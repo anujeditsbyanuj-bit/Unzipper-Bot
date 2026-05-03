@@ -1,3 +1,3 @@
-**Language:** Spanish
+**Language:** Sinhala
 
-**Translated by:** [Carlos](https://t.me/Carlitosbby)
+**Translated by:** [@Itz-fork](https://github.com/Itz-fork)

@@ -7,8 +7,10 @@ from pyrogram import idle
 from . import unzipperbot
 from .helpers_nexa.unzip_help import check_logs
 from config import Config
+from .server import keep_alive
 
 if __name__ == "__main__" :
+    keep_alive()
     if not os.path.isdir(Config.DOWNLOAD_LOCATION):
         os.makedirs(Config.DOWNLOAD_LOCATION)
     unzipperbot.start()

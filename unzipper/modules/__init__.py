@@ -10,52 +10,88 @@
 # along with this program. If not, see <http://www.gnu.org/licenses/>   #
 # ===================================================================== #
 
-from os import path, mkdir
-from .errors import ExtractionFailed
-from unzipper.helpers_nexa.utils import run_shell_cmds, run_cmds_on_cr
+from time import time
+from re import match, sub
+from config import Config
+from aiohttp import ClientSession
+from pyrogram.types import Message
+from aiofiles import open as openfile
+from unzipper.helpers_nexa.utils import progress_for_pyrogram
+from .errors import InvalidContentType, FileTooLarge, InvalidUrl, HttpStatusError
 
 
-class Extractor:
+# Http/Https url regex
+# Added as a seperate variable to import only regex pattern
+dl_regex = ("((http|https)://)(www.)?" +
+            "[a-zA-Z0-9@:%._\\+~#?&//=]" +
+            "{2,256}\\.[a-z]" +
+            "{2,6}\\b([-a-zA-Z0-9@:%" +
+            "._\\+~#?&//=]*)")
+
+
+class Downloader:
     """
-    Unzip archives using 7z and zstd
+    Download direct links
     """
 
     def __init__(self) -> None:
-        pass
+        self.gdrive_regex = r"https://drive\.google\.com/file/d/(.*?)/.*?\?usp=sharing"
+        self.dl_regex = ("((http|https)://)(www.)?" +
+                         "[a-zA-Z0-9@:%._\\+~#?&//=]" +
+                         "{2,256}\\.[a-z]" +
+                         "{2,6}\\b([-a-zA-Z0-9@:%" +
+                         "._\\+~#?&//=]*)")
 
-    async def extract(self, arc_path: str, out: str, password: str = "", splitted: bool = False):
+    async def download(self, url: str, path: str, message: Message = None, redirect: bool = False, cont_type: str = "application/", udt: str = "**Trying to Download!** \n"):
         """
-        Extract archive using either 7z or zstd
+        Download a file from direct / gdrive link
 
         Parameters:
 
-            - `arc_path` - Archive path
-            - `out` - Output path
-            - `password` - Password to use incase if the archive is password protected
-            - `splitted` - Pass True if the archive is a splitted archive which usually ends with .001 (+) extensions
+            - `url` - Url to the file
+            - `path` - Output path
+            - `message` - Pyrogram Message object
+            - `redirect` - Redirect url
+            - `udt` - Header for the progress bar
         """
-        if path.splitext(arc_path)[1] == ".zst":
-            mkdir(out)
-            ex = await self._ext_zstd(out, arc_path)
-            await self.__check_output(ex)
-            return ex
+        if match(self.gdrive_regex, url):
+            gurl = await self._parse_gdrive(url)
+            return await self._from_direct_link(url=gurl, path=path, message=message, redirect=True, cont_type=cont_type, udt=udt)
+        elif match(self.dl_regex, url):
+            return await self._from_direct_link(url=url, path=path, message=message, redirect=redirect, cont_type=cont_type, udt=udt)
         else:
-            ex = await self._ext_7z(out, arc_path, password, splitted)
-            await self.__check_output(ex)
-            return ex
+            raise InvalidUrl
 
-    async def _ext_7z(self, out: str, arc_path: str, password: str = "", splitted: bool = False):
-        if password:
-            command = f"7z x -o\"{out}\" -p\"{password}\" \"{arc_path}\" -y"
-        else:
-            command = f"7z x -o\"{out}\" \"{arc_path}\" -y"
-        command += " -tsplit" if splitted else ""
-        return await run_cmds_on_cr(run_shell_cmds, command)
+    async def _parse_gdrive(self, url: str):
+        return sub(r"https://drive\.google\.com/file/d/(.*?)/.*?\?usp=sharing", r"https://drive.google.com/uc?export=download&id=\1", url)
 
-    async def _ext_zstd(self, out: str, arc_path: str):
-        command = f"zstd -f --output-dir-flat \"{out}\" -d \"{arc_path}\""
-        return await run_cmds_on_cr(run_shell_cmds, command)
-
-    async def __check_output(self, out: str):
-        if any(e in out for e in ["Error", "Can't open as archive"]):
-            raise ExtractionFailed
+    async def _from_direct_link(self, url: str, path: str, message: Message = None, redirect: bool = False, cont_type: str = "application/", udt: str = "**Trying to Download!** \n"):
+        async with ClientSession() as session:
+            async with session.get(url, timeout=None, allow_redirects=redirect) as resp:
+                if resp.status == 200:
+                    pass
+                # Support for temporarily moved resources
+                elif resp.status in (301, 302):
+                    resp = await session.get(url, timeout=None, allow_redirects=True)
+                # Raise HttpStatusError if response status isn't 200
+                else:
+                    raise HttpStatusError
+                # Raise InvalidContentType if the content isn't an archive
+                if not cont_type in resp.content_type:
+                    raise InvalidContentType
+                # Handle content length header
+                total = resp.content_length
+                # Raise FileTooLarge if the content size exceeds Config.MAX_DOWNLOAD_SIZE
+                if total and int(total) > Config.MAX_DOWNLOAD_SIZE:
+                    raise FileTooLarge
+                curr = 0
+                st = time()
+                async with openfile(path, mode="wb") as file:
+                    async for chunk in resp.content.iter_chunked(Config.CHUNK_SIZE):
+                        # Raise FileTooLarge if the content size exceeds Config.MAX_DOWNLOAD_SIZE
+                        if curr > Config.MAX_DOWNLOAD_SIZE:
+                            raise FileTooLarge
+                        await file.write(chunk)
+                        curr += len(chunk)
+                        if message:
+                            await progress_for_pyrogram(curr, total, udt, message, st)
